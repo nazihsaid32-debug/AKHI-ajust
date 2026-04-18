@@ -1,0 +1,73 @@
+import streamlit as st
+import pandas as pd
+from datetime import datetime
+
+# إعداد واجهة التطبيق
+st.set_page_config(page_title="Wind Farm Data Clean", layout="wide")
+
+st.title("📊 محرك تنظيف توقفات توربينات الرياح")
+st.info("قم برفع ملف الإكسيل وسيقوم التطبيق بدمج التداخلات وتحديد المسؤوليات تلقائياً.")
+
+# --- قسم الإدخال العلوي (Manual Override) ---
+st.sidebar.header("⚙️ التدخل اليدوي (الخانات العلوية)")
+m_start = st.sidebar.text_input("وقت البداية (DD/MM/YYYY HH:MM:SS)")
+m_end = st.sidebar.text_input("وقت النهاية (DD/MM/YYYY HH:MM:SS)")
+m_resp = st.sidebar.selectbox("المسؤول في هذه الفترة", ["EEM", "GE", "ONEE", "Other"])
+
+# --- قاعدة البيانات المستخرجة من صورك ---
+base_alarme = {
+    'BackWind': 'EEM',
+    'AnemCheck': 'WTG',
+    'HiTemAux1': 'WTG',
+    'ManualStop': 'WTG',
+    'Out of Grid': 'ONEE',
+    'Corrective maintenance': 'WTG'
+}
+
+# --- رفع الملف ---
+file = st.file_uploader("📂 ارفع ملف الإكسيل المستخرج من الـ SCADA", type=['xlsx'])
+
+if file:
+    df = pd.read_excel(file)
+    # تنظيف وتجهيز التواريخ
+    df['Start'] = pd.to_datetime(df['Start Data and Time'], dayfirst=True)
+    df['End'] = pd.to_datetime(df['End Date and Time'], dayfirst=True)
+    df = df.sort_values(['WTG0', 'Start'])
+    
+    clean_data = []
+    
+    for wtg, group in df.groupby('WTG0'):
+        if group.empty: continue
+        
+        # منطق دمج التداخلات
+        c_s, c_e, c_a = group.iloc[0]['Start'], group.iloc[0]['End'], group.iloc[0]['Alarm text']
+        
+        for i in range(1, len(group)):
+            row = group.iloc[i]
+            if row['Start'] <= c_e: # حالة تداخل
+                c_e = max(c_e, row['End'])
+            else:
+                # تحديد المسؤولية قبل إغلاق السطر
+                final_r = base_alarme.get(c_a, 'WTG')
+                
+                # فحص التدخل اليدوي
+                if m_start and m_end:
+                    ms, me = pd.to_datetime(m_start, dayfirst=True), pd.to_datetime(m_end, dayfirst=True)
+                    if not (c_e <= ms or c_s >= me): final_r = m_resp
+                
+                clean_data.append([wtg, c_a, c_s, c_e, final_r])
+                c_s, c_e, c_a = row['Start'], row['End'], row['Alarm text']
+        
+        clean_data.append([wtg, c_a, c_s, c_e, base_alarme.get(c_a, 'WTG')])
+
+    # عرض النتائج
+    res_df = pd.DataFrame(clean_data, columns=['WTG', 'Alarm', 'Start', 'End', 'Responsibility'])
+    res_df['Duration (Min)'] = (res_df['End'] - res_df['Start']).dt.total_seconds() / 60
+    
+    st.subheader("✅ البيانات بعد التنظيف وإزالة التداخلات")
+    st.dataframe(res_df)
+
+    # --- زر التنزيل ---
+    res_df.to_excel("Cleaned_Report.xlsx", index=False)
+    with open("Cleaned_Report.xlsx", "rb") as f:
+        st.download_button("📥 تحميل ملف الإكسيل الجديد", f, file_name="Cleaned_Report.xlsx")
